@@ -48,3 +48,5 @@
 #define STEPPER_ACCELERATION 24000  // Stepper acceleration in steps per second per second
 #define REVERSE_STEPPER      false  // Reverse stepper direction
 #define END_STOP_TRIGGER     HIGH   // End stop trigger state (NO = HIGH, NC = LOW)
+#define PURGE_TRAVEL_MOVES   true   // Continue to purge while moving to the next position after purge position
+#define POSITIVE_PRESSURE    false  // After filling the gantry will stay at the fill position until user button is pressed

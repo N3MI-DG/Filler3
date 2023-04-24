@@ -32,6 +32,7 @@ enum states {
     PRE_PURGE,
     MOVE_FILL,
     FILLING,
+    POST_FILL,
     MOVE_POST_PURGE,
     POST_PURGE
 };
@@ -41,8 +42,10 @@ int currentDestination = 0;
 int previousPress      = 0;
 int ledValue           = 0;
 int ledPrevious        = 0;
-int ledPeriod          = 10;
-int ledTime            = ledPeriod - 1;
+int ledPeriodFill      = 10;
+int ledTimeFill        = ledPeriodFill - 1;
+int ledPeriodFull      = 500;
+int ledTimeFull        = ledPeriodFull - 1;
 
 // Pre defined led breathe values because fancy math is expensive
 float ledArray[360] = {
@@ -86,17 +89,24 @@ void setHome() {
     if (fillerState == MOVE_HOME) {
         fillerState = HOME;
         stepper.setCurrentPosition(0);
+
+        if (digitalRead(PURGE_SOLENOID) == HIGH) { digitalWrite(PURGE_SOLENOID, LOW); } // Close solenoid
     }
 }
 
 
 // User button interrupt function
-void userButton() {
+void userButtonCallBack() {
     if ((millis() - previousPress) > BUTTON_DEBOUNCE) {
         // Move to pre purge if at home position while user button pressed
-        if ( fillerState == HOME) { fillerState = MOVE_PRE_PURGE; }
+        if (fillerState == HOME) { fillerState = MOVE_PRE_PURGE; }
 
-        // Activate emergency stop is user button is pressed while not at home position
+        else if (fillerState == POST_FILL) {
+            if (POST_PURGE_DURATION > 0) { fillerState = MOVE_POST_PURGE; }
+            else                         { fillerState = MOVE_HOME; }
+        }
+
+        // Activate emergency stop is user button is pressed while state is not HOME or POST_FILL
         else {
             servo.write(SERVO_POS_IDLE);       // Move servo to idle position
             digitalWrite(PURGE_SOLENOID, LOW); // Disable solenoid
@@ -111,20 +121,30 @@ void userButton() {
 
 
 // LED filling timer function
-void ledBreathe(void) {
+void ledCallBack(void) {
     if (fillerState == FILLING) {
-        ledTime++;
+        ledTimeFill++;
 
-        if (ledTime == ledPeriod) {
-
-            if      (ledValue == 0)   { ledValue++;             ledPrevious = 0; }
-            else if (ledValue == 360) { ledValue = 0;                            }
-            else                      { ledPrevious = ledValue; ledValue++;      }
+        if (ledTimeFill == ledPeriodFill) {
+            if (ledValue == 360) { ledValue = 0; }
+            else                 { ledValue++;   }
 
             analogWrite(USER_LED, ledArray[ledValue]);
-            ledTime = 0;
+            ledTimeFill = 0;
         }
     }
+
+    else if (fillerState == POST_FILL) {
+        ledTimeFull++;
+
+        if (ledTimeFull == ledPeriodFull) {
+            if (!ledValue == 0)   { ledValue = 0;   }
+            else                  { ledValue = 255; }
+
+            analogWrite(USER_LED, ledValue);
+            ledTimeFull = 0;
+        }
+     }
 
     else { analogWrite(USER_LED, 255); }
 }
@@ -155,7 +175,7 @@ void setup() {
     HardwareTimer *userTimer    = new HardwareTimer(userInstance);
 
     userTimer->setMode(userChannel, TIMER_INPUT_CAPTURE_FALLING, USER_BUTTON);
-    userTimer->attachInterrupt(userChannel, userButton);
+    userTimer->attachInterrupt(userChannel, userButtonCallBack);
     userTimer->resume();
 
     // Setup and attach LED timer
@@ -163,7 +183,7 @@ void setup() {
     HardwareTimer *ledTimer    = new HardwareTimer(ledInstance);
 
     ledTimer->setOverflow(10, HERTZ_FORMAT);
-    ledTimer->attachInterrupt(ledBreathe);
+    ledTimer->attachInterrupt(ledCallBack);
     ledTimer->resume();
 
 }
@@ -173,13 +193,18 @@ void loop() {
     switch(fillerState) {
         case MOVE_HOME:
             if (!stepper.run()) {
-                stepper.setCurrentPosition(FILL_POSITION - 750); // Assume machine starts at its limit (fill position - a little bit)
-                setDestination(50);                              // Set destination just a little past home
-                stepper.moveTo(currentDestination);              // Start moving home
+                if (currentDestination == 0) { stepper.setCurrentPosition(FILL_POSITION - 750); } // Assume machine starts at its limit (fill position - a little bit)
+
+                setDestination(50);                                                               // Set destination just a little past home
+                stepper.moveTo(currentDestination);                                               // Start moving home
             }
 
-            if (digitalRead(END_STOP) == END_STOP_TRIGGER) { setHome();     }
-            else                                           { stepper.run(); }
+            if (digitalRead(END_STOP) == END_STOP_TRIGGER) { 
+                setHome();
+
+                if (PURGE_TRAVEL_MOVES) { digitalWrite(PURGE_SOLENOID, LOW); }                    // Close solenoid
+            }
+            else { stepper.run(); }
 
             break;
 
@@ -200,11 +225,12 @@ void loop() {
             break;
 
         case PRE_PURGE:
-            digitalWrite(PURGE_SOLENOID, HIGH); // Open Solenoid
-            delay(PRE_PURGE_DURATION);          // Wait for pre purge
-            digitalWrite(PURGE_SOLENOID, LOW);  // Close solenoid
+            digitalWrite(PURGE_SOLENOID, HIGH);                             // Open Solenoid
+            delay(PRE_PURGE_DURATION);                                      // Wait for pre purge
+            
+            if (!PURGE_TRAVEL_MOVES) { digitalWrite(PURGE_SOLENOID, LOW); } // Close solenoid
 
-            fillerState = MOVE_FILL;            // Change state to move fill
+            fillerState = MOVE_FILL;                                        // Change state to move fill
             break;
 
         case MOVE_FILL:
@@ -215,7 +241,11 @@ void loop() {
             }
 
             // When destination reached, change state to filling
-            if (stepper.currentPosition() == currentDestination) { fillerState = FILLING; }
+            if (stepper.currentPosition() == currentDestination) {
+                if (PURGE_TRAVEL_MOVES) { digitalWrite(PURGE_SOLENOID, LOW); } // Close solenoid
+
+                fillerState = FILLING;
+            }
 
             stepper.run();
             break;
@@ -228,19 +258,19 @@ void loop() {
                 if (analogRead(FILL_SENSOR) < SENSOR_TRIGGER) {
                     servo.write(SERVO_POS_IDLE);  // Return servo to idle position
 
-                    if (POST_PURGE_DURATION > 0) { fillerState = MOVE_POST_PURGE; }
-                    else                         {
-                        fillerState = MOVE_HOME;
-                        setDestination(50);                 // Set destination just a little past home
-                        stepper.moveTo(currentDestination); // Start moving home
-                        }
+                    if (POSITIVE_PRESSURE)            { fillerState = POST_FILL;       }
+                    else if (POST_PURGE_DURATION > 0) { fillerState = MOVE_POST_PURGE; }
+                    else                              { fillerState = MOVE_HOME;       }
                 }
             }
 
             else { servo.write(SERVO_POS_FILL); } // Move servo to fill position and start filling
 
             break;
-    
+
+        case POST_FILL:
+            break;
+
         case MOVE_POST_PURGE:
             // If Idle, start moving
             if (!stepper.run()) {
@@ -257,11 +287,10 @@ void loop() {
         case POST_PURGE:
             digitalWrite(PURGE_SOLENOID, HIGH); // Open solenoid
             delay(POST_PURGE_DURATION);         // Wait for post purge
-            digitalWrite(PURGE_SOLENOID, LOW);  // Close solenoid
+
+            if (!PURGE_TRAVEL_MOVES) { digitalWrite(PURGE_SOLENOID, LOW); } // Close solenoid
 
             fillerState = MOVE_HOME;            // Change state to move home
-            setDestination(50);                 // Set destination just a little past home
-            stepper.moveTo(currentDestination); // Start moving home
             break;
 
     }

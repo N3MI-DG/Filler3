@@ -12,7 +12,7 @@
 
 ## Method of operation
 <p>
-    When plugged in the can filler will move the servo to the <b>SERVO_POS_IDLE</b> position, make usre the gas solenoid is disabled and raise the gantry to its home position and wait for user input.
+    When plugged in the can filler will move the servo to the <b>SERVO_POS_IDLE</b> position, make sure the gas solenoid is disabled and raise the gantry to its home position and wait for user input.
     <br/><br/>
     Pressing the button will activate the filling process. 
     <br/><br/>
